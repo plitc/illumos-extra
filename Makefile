@@ -10,18 +10,25 @@
 #
 
 #
-# Copyright (c) 2017, Joyent, Inc.
+# Copyright (c) 2018, Joyent, Inc.
 #
 
 #
 # To build everything just run 'gmake' in this directory.
 #
 
-BASE =		$(PWD)
+include $(CURDIR)/../../build.env
+
+BASE =		$(CURDIR)
 DESTDIR =	$(BASE)/proto
 
 ifeq ($(STRAP),strap)
+
 STRAPPROTO =	$(DESTDIR)
+
+COMMA=,
+EXTRA_COMPILERS = $(subst $(COMMA), , $(SHADOW_COMPILERS))
+
 SUBDIRS = \
 	cpp \
 	bzip2 \
@@ -33,9 +40,16 @@ SUBDIRS = \
 	node.js \
 	nss-nspr \
 	openssl1x \
-	perl
+	perl \
+	$(EXTRA_COMPILERS)
+
+STRAPFIX +=	$(PRIMARY_COMPILER) $(EXTRA_COMPILERS)
+STRAPFIX_SUBDIRS=$(STRAPFIX:%=%.strapfix)
+
 else
+
 STRAPPROTO =	$(DESTDIR:proto=proto.strap)
+
 SUBDIRS = \
 	bash \
 	bind \
@@ -78,6 +92,8 @@ SUBDIRS = \
 	wget \
 	xz
 
+STRAPFIX_SUBDIRS =
+
 endif
 
 PATH =		$(STRAPPROTO)/usr/bin:/usr/bin:/usr/sbin:/sbin:/opt/local/bin
@@ -95,6 +111,10 @@ GITDESCRIBE = \
 	g$(shell git describe --all --long | $(AWK) -F'-g' '{print $$NF}')
 
 TARBALL =	$(NAME)-$(BRANCH)-$(TIMESTAMP)-$(GITDESCRIBE).tgz
+
+LIBSTDCXXVER_4 = 6.0.13
+LIBSTDCXXVER_6 = 6.0.22
+LIBSTDCXXVER_7 = 6.0.24
 
 #
 # Some software (e.g., OpenSSL 0.9.8) is very particular about the Perl
@@ -133,20 +153,28 @@ openssh: openssl1x
 # gets appended.
 #
 
+
 $(DESTDIR)/usr/gnu/bin/gas: FRC
 	(cd binutils && \
 	    PKG_CONFIG_LIBDIR="" \
 	    STRAP=$(STRAP) \
 	    $(MAKE) DESTDIR=$(DESTDIR) install)
 
+#
+# gcc lives in a different prefix when building the bootstrap, but not
+# gas.
+#
+ifeq ($(STRAP),strap)
 
-$(DESTDIR)/usr/bin/gcc: $(DESTDIR)/usr/gnu/bin/gas
-	(cd gcc4 && \
+$(DESTDIR)/usr/gcc/$(PRIMARY_COMPILER_VER)/bin/gcc: $(DESTDIR)/usr/gnu/bin/gas
+	@echo "========== building $@ =========="
+	(cd $(PRIMARY_COMPILER) && \
 	    PKG_CONFIG_LIBDIR="" \
 	    STRAP=$(STRAP) \
 	    $(MAKE) DESTDIR=$(DESTDIR) install strapfix)
 
-$(SUBDIRS): $(DESTDIR)/usr/bin/gcc
+$(SUBDIRS): $(DESTDIR)/usr/gcc/$(PRIMARY_COMPILER_VER)/bin/gcc
+	@echo "========== strap building $@ =========="
 	(cd $@ && \
 	    PKG_CONFIG_LIBDIR="" \
 	    STRAP=$(STRAP) \
@@ -156,17 +184,53 @@ $(SUBDIRS): $(DESTDIR)/usr/bin/gcc
 	    NATIVE_PERL=$(NATIVE_PERL) \
 	    $(MAKE) DESTDIR=$(DESTDIR) install)
 
-install: $(SUBDIRS) gcc4 binutils
+$(STRAPFIX_SUBDIRS): $(SUBDIRS)
+	(cd $$(basename $@ .strapfix) && \
+	    PKG_CONFIG_LIBDIR="" \
+	    STRAP=$(STRAP) \
+	    PRIMARY_COMPILER=$(PRIMARY_COMPILER) \
+	    $(MAKE) DESTDIR=$(DESTDIR) strapfix)
 
-install_strap: $(SUBDIRS) gcc4 binutils
+fixup_strap: $(STRAPFIX_SUBDIRS)
+
+install_strap: binutils $(PRIMARY_COMPILER) $(SUBDIRS) fixup_strap
+
+else
+
+#
+# For the non-strap build, we just need the runtime libraries to be in place in
+# the proto dir.
+#
+$(PRIMARY_COMPILER):
+	@echo "========== building $@ =========="
+	(cd $(PRIMARY_COMPILER) && \
+	    PKG_CONFIG_LIBDIR="" \
+	    STRAP=$(STRAP) \
+	    $(MAKE) DESTDIR=$(DESTDIR) fixup)
+
+$(SUBDIRS): $(PRIMARY_COMPILER)
+	@echo "========== building $@ =========="
+	(cd $@ && \
+	    PKG_CONFIG_LIBDIR="" \
+	    STRAP=$(STRAP) \
+	    CTFMERGE=$(CTFMERGE) \
+	    CTFCONVERT=$(CTFCONVERT) \
+	    ALTCTFCONVERT=$(ALTCTFCONVERT) \
+	    NATIVE_PERL=$(NATIVE_PERL) \
+	    $(MAKE) DESTDIR=$(DESTDIR) install)
+
+install: $(PRIMARY_COMPILER) $(SUBDIRS)
+
+endif
 
 clean:
-	-for dir in $(SUBDIRS) gcc4 binutils; \
+	-for dir in $(PRIMARY_COMPILER) $(SUBDIRS) binutils; \
 	    do (cd $$dir; $(MAKE) DESTDIR=$(DESTDIR) clean); done
 	-rm -rf proto
 
 manifest:
-	cp manifest $(DESTDIR)/$(DESTNAME)
+	sed 's/$$LIBSTDCXXVER/$(LIBSTDCXXVER_$(PRIMARY_COMPILER_VER))/g' \
+	    manifest >$(DESTDIR)/$(DESTNAME)
 
 mancheck_conf:
 	cp mancheck.conf $(DESTDIR)/$(DESTNAME)
@@ -176,4 +240,4 @@ tarball:
 
 FRC:
 
-.PHONY: manifest mancheck_conf
+.PHONY: $(PRIMARY_COMPILER) $(SUBDIRS) binutils manifest mancheck_conf
